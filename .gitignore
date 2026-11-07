@@ -31,3 +31,8 @@ htmlcov/
 *.sqlite3
 postgres_data/
 redis_data/
+
+# Python packaging build artifacts
+*.egg-info/
+build/
+dist/
