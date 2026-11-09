@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.modules.auth.router import router as auth_router
+from app.modules.events.router import router as events_router
 
 
 def create_application() -> FastAPI:
@@ -24,6 +25,7 @@ def create_application() -> FastAPI:
     )
 
     application.include_router(auth_router, prefix=settings.API_V1_STR)
+    application.include_router(events_router, prefix=settings.API_V1_STR)
 
     @application.get("/health", tags=["Reliability & Monitoring"])
     async def health_check() -> dict[str, str]:
