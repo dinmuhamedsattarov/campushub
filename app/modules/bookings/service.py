@@ -7,7 +7,7 @@ import uuid
 from fastapi import HTTPException, status
 import qrcode
 from sqlalchemy import func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.booking import Booking, BookingStatus, IdempotencyRecord
@@ -79,6 +79,7 @@ class BookingService:
 
         ticket_code = f"CH-{secrets.token_hex(6).upper()}"
         now = datetime.now(timezone.utc)
+        booking_id = uuid.uuid4()
 
         # Atomic conditional update guarantees booked_count never exceeds capacity
         atomic_inc = await self.db.execute(
@@ -90,12 +91,15 @@ class BookingService:
         if atomic_inc.rowcount == 1:
             qr_data = f"CAMPUSHUB|TICKET:{ticket_code}|EVENT:{event.id}|USER:{user.id}"
             booking = Booking(
+                id=booking_id,
                 user_id=user.id,
                 event_id=event.id,
                 status=BookingStatus.CONFIRMED,
                 ticket_code=ticket_code,
                 qr_code_base64=generate_qr_base64(qr_data),
                 expires_at=now + timedelta(hours=24),
+                created_at=now,
+                updated_at=now,
             )
         else:
             if not payload.join_waitlist_if_full:
@@ -113,28 +117,30 @@ class BookingService:
             )
             next_pos = waitlist_count_res.scalar_one() + 1
             booking = Booking(
+                id=booking_id,
                 user_id=user.id,
                 event_id=event.id,
                 status=BookingStatus.WAITLISTED,
                 ticket_code=ticket_code,
                 waitlist_position=next_pos,
+                created_at=now,
+                updated_at=now,
             )
 
         self.db.add(booking)
-        await self.db.flush()
 
         if idempotency_key:
             self.db.add(
                 IdempotencyRecord(
                     user_id=user.id,
                     idempotency_key=idempotency_key,
-                    booking_id=booking.id,
+                    booking_id=booking_id,
                 )
             )
 
         try:
             await self.db.commit()
-        except IntegrityError as exc:
+        except (IntegrityError, OperationalError) as exc:
             await self.db.rollback()
             if idempotency_key:
                 retry_idem = await self.db.execute(
@@ -152,7 +158,6 @@ class BookingService:
                 detail="Concurrent booking conflict.",
             ) from exc
 
-        await self.db.refresh(booking)
         return BookingResponse.model_validate(booking)
 
     async def get_booking_or_404(self, booking_id: uuid.UUID) -> Booking:
@@ -188,11 +193,12 @@ class BookingService:
             )
 
         was_confirmed = booking.status == BookingStatus.CONFIRMED
+        now = datetime.now(timezone.utc)
         booking.status = BookingStatus.CANCELLED
         booking.waitlist_position = None
+        booking.updated_at = now
 
         if was_confirmed:
-            # Check if anyone is on the waitlist to promote automatically
             next_waitlisted_res = await self.db.execute(
                 select(Booking)
                 .where(
@@ -209,6 +215,7 @@ class BookingService:
                 promoted.status = BookingStatus.CONFIRMED
                 promoted.waitlist_position = None
                 promoted.qr_code_base64 = generate_qr_base64(qr_data)
+                promoted.updated_at = now
             else:
                 await self.db.execute(
                     update(Event)
@@ -217,5 +224,4 @@ class BookingService:
                 )
 
         await self.db.commit()
-        await self.db.refresh(booking)
         return BookingResponse.model_validate(booking)
